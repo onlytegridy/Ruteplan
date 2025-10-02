@@ -6,7 +6,7 @@ import requests
 import streamlit as st
 
 # ------------------ Sideopsætning + let styling ------------------
-st.set_page_config(page_title="Ruteplanlægger", page_icon="🚚", layout="centered")
+st.set_page_config(page_title="Ruteplanlægger (flere biler)", page_icon="🚚", layout="centered")
 st.markdown("""
 <style>
 .block-container { padding-top: 2rem; max-width: 1000px; }
@@ -19,7 +19,10 @@ a[href^="https://www.google.com/maps/dir/"] { font-weight: 600; }
 st.title("🚚 Ruteplanlægger (flere biler)")
 
 # ------------------ Indstillinger ------------------
-TIME_LIMIT_S = 30                  # tidsbudget til 2-opt pr. rute
+TIME_LIMIT_S = 30          # tidsbudget til 2-opt pr. rute (slutresultat)
+BALANCE_TL = 4             # kortere tidsbudget til balancering (hurtig vurdering)
+BALANCE_IMPROVE_MIN = 120  # stop balancering hvis max-min forbedres < 120 sek
+BALANCE_MAX_ITERS = 8      # maks. balancerings-iterationer
 HQ_ADDR = "Industrivej 6, 6200 Aabenraa"
 
 # ------------------ Udtræk adresser fra tekst ------------------
@@ -130,31 +133,118 @@ def solve_tsp_open(duration_matrix, start_index=0, time_limit_s=10):
                     improved = True
     return route, total
 
-# ------------------ Sweep-klyngedeling (geometrisk) ------------------
-def clusters_by_sweep(coords_latlon, k):
+# ------------------ K-means klynger (geografisk) ------------------
+def _dist2(a, b):
+    return (a[0]-b[0])**2 + (a[1]-b[1])**2
+
+def clusters_by_kmeans(coords_latlon, k, max_iter=20):
     """
-    Del noder (1..N-1) i k klynger efter vinkel omkring depot (index 0).
-    Fordel så jævnt som muligt efter antal stop.
-    Returnerer liste af lister med globale indeks (uden 0).
+    K-means på (lat, lon) for noder 1..N-1 (depot = index 0).
+    Returnerer liste af klynger, hver som liste af GLOBALE indeks (>=1).
+    Sikrer k <= antal stop og undgår tomme klynger.
     """
-    n = len(coords_latlon)
-    if n <= 1:
+    points = [(coords_latlon[i][0], coords_latlon[i][1], i) for i in range(1, len(coords_latlon))]
+    m = len(points)
+    if m == 0:
         return []
-    depot_lat, depot_lon = coords_latlon[0]
-    nodes = []
-    for idx in range(1, n):
-        lat, lon = coords_latlon[idx]
-        ang = math.atan2(lat - depot_lat, lon - depot_lon)
-        nodes.append((ang, idx))
-    nodes.sort()
-    m = len(nodes)
-    k = max(1, min(k, m))  # højst ét stop pr. bil minimum
-    sizes = [m // k + (1 if i < (m % k) else 0) for i in range(k)]
-    out, p = [], 0
-    for size in sizes:
-        out.append([nodes[j][1] for j in range(p, p + size)])
-        p += size
-    return out
+    k = max(1, min(k, m))
+
+    # k-means++-lignende deterministisk init
+    depot = coords_latlon[0][:2]
+    centers = [max(points, key=lambda p: _dist2((p[0], p[1]), depot))]
+    while len(centers) < k:
+        best = max(points, key=lambda p: min(_dist2((p[0], p[1]), (c[0], c[1])) for c in centers))
+        centers.append(best)
+    centers = [(c[0], c[1]) for c in centers]
+
+    for _ in range(max_iter):
+        clusters = [[] for _ in range(k)]
+        for (lat, lon, idx) in points:
+            ci = min(range(k), key=lambda j: _dist2((lat, lon), centers[j]))
+            clusters[ci].append((lat, lon, idx))
+
+        # undgå tomme klynger: stjæl fjerneste punkt fra største klynge
+        for j in range(k):
+            if not clusters[j]:
+                L = max(range(k), key=lambda t: len(clusters[t]))
+                lat, lon, idx = max(clusters[L], key=lambda p: _dist2((p[0], p[1]), centers[L]))
+                clusters[L].remove((lat, lon, idx))
+                clusters[j].append((lat, lon, idx))
+
+        new_centers = []
+        for cl in clusters:
+            la = sum(p[0] for p in cl)/len(cl)
+            lo = sum(p[1] for p in cl)/len(cl)
+            new_centers.append((la, lo))
+        if all(_dist2(centers[i], new_centers[i]) < 1e-12 for i in range(k)):
+            break
+        centers = new_centers
+
+    return [[p[2] for p in cl] for cl in clusters]  # globale indeks (uden 0)
+
+# ------------------ Balancering efter estimeret tid (valgfri) ------------------
+def get_submatrix(durs, idxs):
+    return [[durs[i][j] for j in idxs] for i in idxs]
+
+def route_time_seconds(durs, global_idxs, roundtrip: bool, tl: int):
+    """Estimer rute-tid (sek) for depot+global_idxs med kort tidsbudget."""
+    if not global_idxs:
+        return 0
+    idxs = [0] + list(global_idxs)
+    sub = get_submatrix(durs, idxs)
+    if roundtrip:
+        _, total = solve_tsp_roundtrip(sub, start_index=0, time_limit_s=tl)
+    else:
+        _, total = solve_tsp_open(sub, start_index=0, time_limit_s=tl)
+    return total
+
+def balance_clusters_by_time(durs, clusters, roundtrip: bool,
+                             max_iters=BALANCE_MAX_ITERS,
+                             improve_min=BALANCE_IMPROVE_MIN):
+    """
+    Flytter ét stop ad gangen fra den langsomste rute til en anden rute,
+    hvis det sænker den maksimale rute-tid. Stopper ved lille forbedring eller max_iters.
+    """
+    k = len(clusters)
+    if k <= 1:
+        return clusters
+
+    for _ in range(max_iters):
+        times = [route_time_seconds(durs, cl, roundtrip, BALANCE_TL) for cl in clusters]
+        imax = max(range(k), key=lambda i: times[i])
+        imin = min(range(k), key=lambda i: times[i])
+        gap = times[imax] - times[imin]
+        if gap <= improve_min:
+            break
+
+        best_move = None
+        best_new_max = times[imax]
+        # prøv at flytte et stop fra langsomste rute til en anden
+        for s in list(clusters[imax]):
+            if len(clusters[imax]) <= 1:
+                continue  # lad være med at tømme ruten helt
+            for r in range(k):
+                if r == imax:
+                    continue
+                new_L = [x for x in clusters[imax] if x != s]
+                new_R = clusters[r] + [s]
+                tL = route_time_seconds(durs, new_L, roundtrip, BALANCE_TL) if new_L else 0
+                tR = route_time_seconds(durs, new_R, roundtrip, BALANCE_TL)
+                new_times = times.copy()
+                new_times[imax] = tL
+                new_times[r] = tR
+                new_max = max(new_times)
+                if new_max < best_new_max:
+                    best_new_max = new_max
+                    best_move = (s, imax, r)
+
+        if not best_move:
+            break
+        s, a, b = best_move
+        clusters[a].remove(s)
+        clusters[b].append(s)
+
+    return clusters
 
 # ------------------ Google Maps-links (deles i bidder á maks. 10) ------------------
 def make_gmaps_links(route_addresses, max_stops=10):
@@ -204,21 +294,23 @@ if addresses:
 else:
     st.info("Ingen adresser fundet endnu. Indsæt mindst én adresse (ud over Industrivej 6).")
 
-# Vælg start, rundtur/én-vejs, antal biler
+# Vælg start, rundtur/én-vejs, antal biler og balancering
 if len(addresses) >= 2:
-    c1, c2, c3 = st.columns([1.2, 0.9, 0.9])
+    c1, c2, c3, c4 = st.columns([1.4, 1.0, 1.0, 1.2])
     with c1:
         start_choice = st.selectbox("Start (og evt. slut) ved", options=addresses, index=default_index)
     with c2:
         roundtrip = st.checkbox("Rundtur (tilbage til start)", value=True)
     with c3:
         vehicles = st.slider("Antal biler", min_value=1, max_value=4, value=2, step=1)
+    with c4:
+        balance_on = st.checkbox("Balancér ruter efter tid", value=True)
 
     max_per_link = st.slider("Maks. stop pr. Google-link", 2, 10, 10)
 
     if st.button("🚚 Beregn ruter"):
         try:
-            # Læg den valgte start først (depot)
+            # Depot først
             ordered = [start_choice] + [a for a in addresses if a != start_choice]
 
             with st.spinner("Geokoder adresser via DAWA…"):
@@ -228,15 +320,23 @@ if len(addresses) >= 2:
             with st.spinner("Henter rejsetider (OSRM)…"):
                 durs = osrm_duration_matrix(coords)
 
-            # Del stop (uden depot) i k klynger
-            cluster_indices = clusters_by_sweep(coords, vehicles)
+            # Klynger pr. bil (k-means). Antal biler kan højst være antal stop.
+            stops_count = len(coords) - 1
+            eff_vehicles = max(1, min(vehicles, stops_count))
+            clusters = clusters_by_kmeans(coords, eff_vehicles)
+
+            # Valgfri balancering efter estimeret tid
+            if balance_on and eff_vehicles > 1:
+                clusters = balance_clusters_by_time(durs, clusters, roundtrip)
 
             total_all_min = 0
             st.markdown("## Ruter pr. bil")
-            for v_idx, cluster in enumerate(cluster_indices, start=1):
-                # sub-problem: depot (0) + denne klynges noder
+            for v_idx, cluster in enumerate(clusters, start=1):
+                if not cluster:
+                    continue  # bør ikke ske med k-means + balancering
+
                 sub_idx = [0] + cluster
-                sub_mat = [[durs[i][j] for j in sub_idx] for i in sub_idx]
+                sub_mat = get_submatrix(durs, sub_idx)
 
                 if roundtrip:
                     sub_order, sub_total = solve_tsp_roundtrip(sub_mat, start_index=0, time_limit_s=TIME_LIMIT_S)
@@ -250,7 +350,7 @@ if len(addresses) >= 2:
                 tot_min = int(round(sub_total / 60))
                 total_all_min += tot_min
 
-                st.markdown(f"### Bil {v_idx}  —  est. {tot_min} min")
+                st.markdown(f"### Bil {v_idx} — est. {tot_min} min")
                 st.table([{"Stop #": i+1, "Adresse": a} for i, a in enumerate(route_addresses)])
 
                 links = make_gmaps_links(route_addresses, max_stops=max_per_link)
