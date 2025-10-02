@@ -1,5 +1,6 @@
 import re
 import time
+import math
 from urllib.parse import quote_plus
 import requests
 import streamlit as st
@@ -8,17 +9,17 @@ import streamlit as st
 st.set_page_config(page_title="Ruteplanlægger", page_icon="🚚", layout="centered")
 st.markdown("""
 <style>
-.block-container { padding-top: 2rem; max-width: 900px; }
+.block-container { padding-top: 2rem; max-width: 1000px; }
 h1, h2, h3 { font-weight: 700; }
 .stButton > button { border-radius: 10px; padding: 0.6rem 1rem; }
 a[href^="https://www.google.com/maps/dir/"] { font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🚚 Ruteplanlægger")
+st.title("🚚 Ruteplanlægger (flere biler)")
 
 # ------------------ Indstillinger ------------------
-TIME_LIMIT_S = 30                  # tidsbudget til 2-opt
+TIME_LIMIT_S = 30                  # tidsbudget til 2-opt pr. rute
 HQ_ADDR = "Industrivej 6, 6200 Aabenraa"
 
 # ------------------ Udtræk adresser fra tekst ------------------
@@ -62,7 +63,7 @@ def osrm_duration_matrix(coords_latlon):
     """coords_latlon = [(lat, lon), ...] -> matrix med sekunder mellem alle punkter."""
     locs = ";".join([f"{lon},{lat}" for (lat, lon) in coords_latlon])
     url = f"https://router.project-osrm.org/table/v1/driving/{locs}"
-    r = requests.get(url, params={"annotations": "duration"}, timeout=20)
+    r = requests.get(url, params={"annotations": "duration"}, timeout=25)
     r.raise_for_status()
     data = r.json()
     durs = data.get("durations")
@@ -73,11 +74,8 @@ def osrm_duration_matrix(coords_latlon):
 
 # ------------------ TSP (ren Python): nærmeste nabo + 2-opt ------------------
 def solve_tsp_roundtrip(duration_matrix, start_index=0, time_limit_s=10):
-    """
-    Rundtur: returnerer (orden, total_sek). 'orden' starter og slutter ved start_index.
-    """
+    """Rundtur: returnerer (orden, total_sek). 'orden' starter og slutter ved start_index."""
     n = len(duration_matrix)
-    # 1) Nærmeste-nabo
     unvisited = set(range(n))
     route = [start_index]; unvisited.remove(start_index); cur = start_index
     while unvisited:
@@ -88,10 +86,8 @@ def solve_tsp_roundtrip(duration_matrix, start_index=0, time_limit_s=10):
     def cost(rt): return sum(duration_matrix[a][b] for a, b in zip(rt[:-1], rt[1:]))
     total = cost(route)
 
-    # 2) 2-opt (lukket tur)
     start_t = time.monotonic()
     improved = True
-    m = len(route)  # = n+1
     while improved and (time.monotonic() - start_t) < time_limit_s:
         improved = False
         for i in range(1, n - 1):
@@ -107,11 +103,8 @@ def solve_tsp_roundtrip(duration_matrix, start_index=0, time_limit_s=10):
     return route, total
 
 def solve_tsp_open(duration_matrix, start_index=0, time_limit_s=10):
-    """
-    Én-vejs: returnerer (orden, total_sek). Starter ved start_index og slutter optimalt (ingen retur).
-    """
+    """Én-vejs: returnerer (orden, total_sek). Starter ved start_index og slutter optimalt (ingen retur)."""
     n = len(duration_matrix)
-    # 1) Nærmeste-nabo uden at lukke løkken
     unvisited = set(range(n))
     route = [start_index]; unvisited.remove(start_index); cur = start_index
     while unvisited:
@@ -121,7 +114,6 @@ def solve_tsp_open(duration_matrix, start_index=0, time_limit_s=10):
     def cost(rt): return sum(duration_matrix[a][b] for a, b in zip(rt[:-1], rt[1:]))
     total = cost(route)
 
-    # 2) 2-opt (åben tur: samme delta-formel virker når i>=1 og j<=n-1)
     start_t = time.monotonic()
     improved = True
     while improved and (time.monotonic() - start_t) < time_limit_s:
@@ -137,6 +129,32 @@ def solve_tsp_open(duration_matrix, start_index=0, time_limit_s=10):
                     total -= delta
                     improved = True
     return route, total
+
+# ------------------ Sweep-klyngedeling (geometrisk) ------------------
+def clusters_by_sweep(coords_latlon, k):
+    """
+    Del noder (1..N-1) i k klynger efter vinkel omkring depot (index 0).
+    Fordel så jævnt som muligt efter antal stop.
+    Returnerer liste af lister med globale indeks (uden 0).
+    """
+    n = len(coords_latlon)
+    if n <= 1:
+        return []
+    depot_lat, depot_lon = coords_latlon[0]
+    nodes = []
+    for idx in range(1, n):
+        lat, lon = coords_latlon[idx]
+        ang = math.atan2(lat - depot_lat, lon - depot_lon)
+        nodes.append((ang, idx))
+    nodes.sort()
+    m = len(nodes)
+    k = max(1, min(k, m))  # højst ét stop pr. bil minimum
+    sizes = [m // k + (1 if i < (m % k) else 0) for i in range(k)]
+    out, p = [], 0
+    for size in sizes:
+        out.append([nodes[j][1] for j in range(p, p + size)])
+        p += size
+    return out
 
 # ------------------ Google Maps-links (deles i bidder á maks. 10) ------------------
 def make_gmaps_links(route_addresses, max_stops=10):
@@ -158,9 +176,9 @@ def make_gmaps_links(route_addresses, max_stops=10):
 
 # ------------------ UI ------------------
 raw = st.text_area(
-    "Indsæt adresser (én pr. linje).",
+    "Indsæt adresser (én pr. linje). Overskrifter som '6200' ignoreres automatisk.",
     height=220,
-    placeholder="Industrivej 6, 6200 Aabenraa\nLindbjergparken 57, 6200\n…",
+    placeholder="Kystvej 22, 6200 Aabenraa\nLindbjergparken 57, 6200 Aabenraa\nSaturnvej 26, 8800 Viborg\n…",
 )
 
 addresses = extract_addresses_from_text(raw)
@@ -184,21 +202,23 @@ if addresses:
     st.success(f"Fandt {len(addresses)} adresser")
     st.table([{"Adresse": a} for a in addresses])
 else:
-    st.info("Ingen adresser fundet endnu. Indsæt mindst én adresse.")
+    st.info("Ingen adresser fundet endnu. Indsæt mindst én adresse (ud over Industrivej 6).")
 
-# Vælg start og om ruten er rundtur/én-vejs
+# Vælg start, rundtur/én-vejs, antal biler
 if len(addresses) >= 2:
     c1, c2, c3 = st.columns([1.2, 0.9, 0.9])
     with c1:
-        start_choice = st.selectbox("Start og slut ved", options=addresses, index=default_index)
+        start_choice = st.selectbox("Start (og evt. slut) ved", options=addresses, index=default_index)
     with c2:
         roundtrip = st.checkbox("Rundtur (tilbage til start)", value=True)
     with c3:
-        max_per_link = st.slider("Maks. stop pr. Google-link", 2, 10, 10)
+        vehicles = st.slider("Antal biler", min_value=1, max_value=4, value=2, step=1)
 
-    if st.button("🚚 Beregn rute"):
+    max_per_link = st.slider("Maks. stop pr. Google-link", 2, 10, 10)
+
+    if st.button("🚚 Beregn ruter"):
         try:
-            # Læg den valgte start først
+            # Læg den valgte start først (depot)
             ordered = [start_choice] + [a for a in addresses if a != start_choice]
 
             with st.spinner("Geokoder adresser via DAWA…"):
@@ -206,36 +226,42 @@ if len(addresses) >= 2:
             coords = [(lat, lon) for _, lat, lon in geocoded]
 
             with st.spinner("Henter rejsetider (OSRM)…"):
-                dur = osrm_duration_matrix(coords)
+                durs = osrm_duration_matrix(coords)
 
-            with st.spinner("Optimerer rute…"):
+            # Del stop (uden depot) i k klynger
+            cluster_indices = clusters_by_sweep(coords, vehicles)
+
+            total_all_min = 0
+            st.markdown("## Ruter pr. bil")
+            for v_idx, cluster in enumerate(cluster_indices, start=1):
+                # sub-problem: depot (0) + denne klynges noder
+                sub_idx = [0] + cluster
+                sub_mat = [[durs[i][j] for j in sub_idx] for i in sub_idx]
+
                 if roundtrip:
-                    order_idx, total_sec = solve_tsp_roundtrip(dur, start_index=0, time_limit_s=TIME_LIMIT_S)
+                    sub_order, sub_total = solve_tsp_roundtrip(sub_mat, start_index=0, time_limit_s=TIME_LIMIT_S)
                 else:
-                    order_idx, total_sec = solve_tsp_open(dur, start_index=0, time_limit_s=TIME_LIMIT_S)
+                    sub_order, sub_total = solve_tsp_open(sub_mat, start_index=0, time_limit_s=TIME_LIMIT_S)
 
-            route_addresses = [ordered[i] for i in order_idx]
-            total_min = int(round(total_sec / 60))
+                # tilbage til globale indeks og adresser
+                global_order = [sub_idx[i] for i in sub_order]
+                route_addresses = [ordered[i] for i in global_order]
 
-            if roundtrip:
-                st.success(f"Færdig! Estimeret samlet køretid: ca. {total_min} min.  \n"
-                           f"**Start & slut:** {start_choice}")
-            else:
-                st.success(f"Færdig! Estimeret samlet køretid: ca. {total_min} min.  \n"
-                           f"**Start:** {start_choice}  •  **Slut:** {route_addresses[-1]}")
+                tot_min = int(round(sub_total / 60))
+                total_all_min += tot_min
 
-            st.markdown("#### Stop i rækkefølge")
-            st.table([{"Stop #": i+1, "Adresse": a} for i, a in enumerate(route_addresses)])
+                st.markdown(f"### Bil {v_idx}  —  est. {tot_min} min")
+                st.table([{"Stop #": i+1, "Adresse": a} for i, a in enumerate(route_addresses)])
 
-            st.markdown("#### Google Maps-link(s)")
-            links = make_gmaps_links(route_addresses, max_stops=max_per_link)
-            for i, u in enumerate(links, 1):
-                st.markdown(f"{i}. [{u}]({u})")
+                links = make_gmaps_links(route_addresses, max_stops=max_per_link)
+                for i, u in enumerate(links, 1):
+                    st.markdown(f"{i}. [{u}]({u})")
 
-            st.markdown("#### Kopiér alle links")
-            st.code("\n".join(links), language="text")
+                st.markdown("---")
+
+            st.success(f"**Samlet estimeret køretid (alle biler): ~{total_all_min} min**")
 
         except Exception as e:
             st.error(str(e))
 else:
-    st.caption("Tilføj mindst én ekstra adresse for at beregne ruten.")
+    st.caption("Tilføj mindst én ekstra adresse for at beregne ruter.")
