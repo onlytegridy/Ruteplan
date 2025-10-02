@@ -18,7 +18,7 @@ a[href^="https://www.google.com/maps/dir/"] { font-weight: 600; }
 st.title("🚚 Ruteplanlægger")
 
 # ------------------ Indstillinger ------------------
-TIME_LIMIT_S = 30  # fast tidsbudget til 2-opt forbedring
+TIME_LIMIT_S = 30                  # tidsbudget til 2-opt
 HQ_ADDR = "Industrivej 6, 6200 Aabenraa"
 
 # ------------------ Udtræk adresser fra tekst ------------------
@@ -125,27 +125,27 @@ def make_gmaps_links(route_addresses, max_stops=10):
 
 # ------------------ UI ------------------
 raw = st.text_area(
-    "Indsæt adresser (én pr. linje).",
+    "Indsæt adresser (én pr. linje). Overskrifter som '6200' ignoreres automatisk.",
     height=220,
-    placeholder="Industrivej 6, 6200 Aabenraa\nLindbjergparken 57, 6200 Aabenraa\n…",
+    placeholder="Kystvej 22, 6200 Aabenraa\nLindbjergparken 57, 6200 Aabenraa\nSaturnvej 26, 8800 Viborg\n…",
 )
 
 addresses = extract_addresses_from_text(raw)
 
-# Sørg for at HQ (Industrivej 6) altid er først og med i listen
+# Fjern dubletter, bevar rækkefølge
 if addresses:
-    # fjern dubletter
     seen, dedup = set(), []
     for a in addresses:
         if a not in seen:
             seen.add(a); dedup.append(a)
     addresses = dedup
-    if HQ_ADDR in addresses:
-        addresses = [HQ_ADDR] + [a for a in addresses if a != HQ_ADDR]
-    else:
-        addresses = [HQ_ADDR] + addresses
 
-st.markdown(f"**Start & slut:** {HQ_ADDR}")
+# Sørg for at HQ findes i listen (så den kan vælges som standard)
+if HQ_ADDR in addresses:
+    default_index = addresses.index(HQ_ADDR)
+else:
+    addresses = [HQ_ADDR] + addresses
+    default_index = 0
 
 if addresses:
     st.success(f"Fandt {len(addresses)} adresser")
@@ -153,13 +153,21 @@ if addresses:
 else:
     st.info("Ingen adresser fundet endnu. Indsæt mindst én adresse (ud over Industrivej 6).")
 
+# Vælg start/slut (rundtur). Standard = Industrivej 6.
 if len(addresses) >= 2:
-    max_per_link = st.slider("Maks. stop pr. Google-link", 2, 10, 10)
+    c1, c2 = st.columns([1,1])
+    with c1:
+        start_choice = st.selectbox("Start (og slut) ved", options=addresses, index=default_index)
+    with c2:
+        max_per_link = st.slider("Maks. stop pr. Google-link", 2, 10, 10)
 
     if st.button("🚚 Beregn bedste rute (rundtur)"):
         try:
+            # Læg den valgte start først, så solver starter/slutter dér
+            ordered = [start_choice] + [a for a in addresses if a != start_choice]
+
             with st.spinner("Geokoder adresser via DAWA…"):
-                geocoded = geocode(addresses)
+                geocoded = geocode(ordered)
             coords = [(lat, lon) for _, lat, lon in geocoded]
 
             with st.spinner("Henter rejsetider (OSRM)…"):
@@ -170,9 +178,10 @@ if len(addresses) >= 2:
                     dur, start_index=0, time_limit_s=TIME_LIMIT_S
                 )
 
-            route_addresses = [addresses[i] for i in order_idx]
+            route_addresses = [ordered[i] for i in order_idx]
             total_min = int(round(total_sec / 60))
-            st.success(f"Færdig! Estimeret samlet køretid: ca. {total_min} min.")
+            st.success(f"Færdig! Estimeret samlet køretid: ca. {total_min} min.  \n"
+                       f"**Start & slut:** {start_choice}")
 
             st.markdown("#### Stop i rækkefølge")
             st.table([{"Stop #": i+1, "Adresse": a} for i, a in enumerate(route_addresses)])
