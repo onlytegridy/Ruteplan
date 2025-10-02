@@ -125,9 +125,9 @@ def make_gmaps_links(route_addresses, max_stops=10):
 
 # ------------------ UI ------------------
 raw = st.text_area(
-    "Indsæt adresser (én pr. linje). Overskrifter som '6200' ignoreres automatisk.",
+    "Indsæt adresser (én pr. linje).",
     height=220,
-    placeholder="Kystvej 22, 6200 Aabenraa\nLindbjergparken 57, 6200 Aabenraa\nSaturnvej 26, 8800 Viborg\n…",
+    placeholder="Industrivej 6, 6200 Aabenraa\nLindbjergparken 57, 6200 Aabenraa\n…",
 )
 
 addresses = extract_addresses_from_text(raw)
