@@ -158,9 +158,9 @@ def make_gmaps_links(route_addresses, max_stops=10):
 
 # ------------------ UI ------------------
 raw = st.text_area(
-    "Indsæt adresser (én pr. linje). Overskrifter som '6200' ignoreres automatisk.",
+    "Indsæt adresser (én pr. linje).",
     height=220,
-    placeholder="Kystvej 22, 6200 Aabenraa\nLindbjergparken 57, 6200 Aabenraa\nSaturnvej 26, 8800 Viborg\n…",
+    placeholder="Industrivej 6, 6200 Aabenraa\nLindbjergparken 57, 6200\n…",
 )
 
 addresses = extract_addresses_from_text(raw)
@@ -184,13 +184,13 @@ if addresses:
     st.success(f"Fandt {len(addresses)} adresser")
     st.table([{"Adresse": a} for a in addresses])
 else:
-    st.info("Ingen adresser fundet endnu. Indsæt mindst én adresse (ud over Industrivej 6).")
+    st.info("Ingen adresser fundet endnu. Indsæt mindst én adresse.")
 
 # Vælg start og om ruten er rundtur/én-vejs
 if len(addresses) >= 2:
     c1, c2, c3 = st.columns([1.2, 0.9, 0.9])
     with c1:
-        start_choice = st.selectbox("Start (og evt. slut) ved", options=addresses, index=default_index)
+        start_choice = st.selectbox("Start og slut ved", options=addresses, index=default_index)
     with c2:
         roundtrip = st.checkbox("Rundtur (tilbage til start)", value=True)
     with c3:
