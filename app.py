@@ -71,13 +71,13 @@ def osrm_duration_matrix(coords_latlon):
     BIG = 10**7  # stor straf for uopnåelige ruter (burde ikke ske i DK)
     return [[int(x if x is not None else BIG) for x in row] for row in durs]
 
-# ------------------ TSP rundtur (ren Python): nærmeste nabo + 2-opt ------------------
+# ------------------ TSP (ren Python): nærmeste nabo + 2-opt ------------------
 def solve_tsp_roundtrip(duration_matrix, start_index=0, time_limit_s=10):
     """
-    Returnerer (orden, total_sek). 'orden' starter og slutter ved start_index.
+    Rundtur: returnerer (orden, total_sek). 'orden' starter og slutter ved start_index.
     """
     n = len(duration_matrix)
-    # 1) Nærmeste-nabo starttur
+    # 1) Nærmeste-nabo
     unvisited = set(range(n))
     route = [start_index]; unvisited.remove(start_index); cur = start_index
     while unvisited:
@@ -88,7 +88,40 @@ def solve_tsp_roundtrip(duration_matrix, start_index=0, time_limit_s=10):
     def cost(rt): return sum(duration_matrix[a][b] for a, b in zip(rt[:-1], rt[1:]))
     total = cost(route)
 
-    # 2) 2-opt forbedring inden for tidsbudget
+    # 2) 2-opt (lukket tur)
+    start_t = time.monotonic()
+    improved = True
+    m = len(route)  # = n+1
+    while improved and (time.monotonic() - start_t) < time_limit_s:
+        improved = False
+        for i in range(1, n - 1):
+            for j in range(i + 1, n):
+                a, b = route[i - 1], route[i]
+                c, d = route[j - 1], route[j]
+                delta = (duration_matrix[a][b] + duration_matrix[c][d]) - \
+                        (duration_matrix[a][c] + duration_matrix[b][d])
+                if delta > 0:
+                    route[i:j] = reversed(route[i:j])
+                    total -= delta
+                    improved = True
+    return route, total
+
+def solve_tsp_open(duration_matrix, start_index=0, time_limit_s=10):
+    """
+    Én-vejs: returnerer (orden, total_sek). Starter ved start_index og slutter optimalt (ingen retur).
+    """
+    n = len(duration_matrix)
+    # 1) Nærmeste-nabo uden at lukke løkken
+    unvisited = set(range(n))
+    route = [start_index]; unvisited.remove(start_index); cur = start_index
+    while unvisited:
+        nxt = min(unvisited, key=lambda j: duration_matrix[cur][j])
+        route.append(nxt); unvisited.remove(nxt); cur = nxt
+
+    def cost(rt): return sum(duration_matrix[a][b] for a, b in zip(rt[:-1], rt[1:]))
+    total = cost(route)
+
+    # 2) 2-opt (åben tur: samme delta-formel virker når i>=1 og j<=n-1)
     start_t = time.monotonic()
     improved = True
     while improved and (time.monotonic() - start_t) < time_limit_s:
@@ -108,8 +141,8 @@ def solve_tsp_roundtrip(duration_matrix, start_index=0, time_limit_s=10):
 # ------------------ Google Maps-links (deles i bidder á maks. 10) ------------------
 def make_gmaps_links(route_addresses, max_stops=10):
     """
-    route_addresses skal indeholde retur til start.
     Deler i links med <= max_stops; næste link starter hvor det forrige sluttede.
+    Virker både for rundtur og én-vejs.
     """
     links, n, start = [], len(route_addresses), 0
     while start < n:
@@ -153,17 +186,19 @@ if addresses:
 else:
     st.info("Ingen adresser fundet endnu. Indsæt mindst én adresse (ud over Industrivej 6).")
 
-# Vælg start/slut (rundtur). Standard = Industrivej 6.
+# Vælg start og om ruten er rundtur/én-vejs
 if len(addresses) >= 2:
-    c1, c2 = st.columns([1,1])
+    c1, c2, c3 = st.columns([1.2, 0.9, 0.9])
     with c1:
-        start_choice = st.selectbox("Start (og slut) ved", options=addresses, index=default_index)
+        start_choice = st.selectbox("Start (og evt. slut) ved", options=addresses, index=default_index)
     with c2:
+        roundtrip = st.checkbox("Rundtur (tilbage til start)", value=True)
+    with c3:
         max_per_link = st.slider("Maks. stop pr. Google-link", 2, 10, 10)
 
-    if st.button("🚚 Beregn bedste rute (rundtur)"):
+    if st.button("🚚 Beregn rute"):
         try:
-            # Læg den valgte start først, så solver starter/slutter dér
+            # Læg den valgte start først
             ordered = [start_choice] + [a for a in addresses if a != start_choice]
 
             with st.spinner("Geokoder adresser via DAWA…"):
@@ -174,14 +209,20 @@ if len(addresses) >= 2:
                 dur = osrm_duration_matrix(coords)
 
             with st.spinner("Optimerer rute…"):
-                order_idx, total_sec = solve_tsp_roundtrip(
-                    dur, start_index=0, time_limit_s=TIME_LIMIT_S
-                )
+                if roundtrip:
+                    order_idx, total_sec = solve_tsp_roundtrip(dur, start_index=0, time_limit_s=TIME_LIMIT_S)
+                else:
+                    order_idx, total_sec = solve_tsp_open(dur, start_index=0, time_limit_s=TIME_LIMIT_S)
 
             route_addresses = [ordered[i] for i in order_idx]
             total_min = int(round(total_sec / 60))
-            st.success(f"Færdig! Estimeret samlet køretid: ca. {total_min} min.  \n"
-                       f"**Start & slut:** {start_choice}")
+
+            if roundtrip:
+                st.success(f"Færdig! Estimeret samlet køretid: ca. {total_min} min.  \n"
+                           f"**Start & slut:** {start_choice}")
+            else:
+                st.success(f"Færdig! Estimeret samlet køretid: ca. {total_min} min.  \n"
+                           f"**Start:** {start_choice}  •  **Slut:** {route_addresses[-1]}")
 
             st.markdown("#### Stop i rækkefølge")
             st.table([{"Stop #": i+1, "Adresse": a} for i, a in enumerate(route_addresses)])
@@ -197,4 +238,4 @@ if len(addresses) >= 2:
         except Exception as e:
             st.error(str(e))
 else:
-    st.caption("Tilføj mindst én ekstra adresse for at planlægge ruten.")
+    st.caption("Tilføj mindst én ekstra adresse for at beregne ruten.")
