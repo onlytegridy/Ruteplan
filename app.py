@@ -10,7 +10,7 @@ from google.oauth2.service_account import Credentials
 # ==========================================
 # 1. Sideopsætning MÅ SKAL være det første
 # ==========================================
-st.set_page_config(page_title="Ruteplanlægger (flere biler)", page_icon="🚚", layout="centered")
+st.set_page_config(page_title="Ruteplanlægger", page_icon="🚚", layout="centered")
 st.markdown("""
 <style>
 .block-container { padding-top: 2rem; max-width: 1000px; }
