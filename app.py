@@ -255,7 +255,11 @@ def make_gmaps_links(route_addresses, max_stops=10):
 # ==========================================
 # 5. UI og Hovedlogik
 # ==========================================
-st.title("🚚 Ruteplanlægger (flere biler)")
+st.title("🚚 Ruteplanlægger")
+
+target_city = st.query_params.get("by", "")
+if target_city:
+    st.info(f"Planlægger udkørsel for: **{target_city}** (Maks 25 adresser)")
 
 # Prøv at hente adresser fra Google Sheets
 try:
@@ -264,10 +268,24 @@ try:
     
     rute_adresser = []
     for row in data:
-        if row.get('Status') == 'Klar til levering' and row.get('By') == 'Aabenraa':
-            rute_adresser.append(str(row.get('Fulde Adresse', '')))
-            
-    sheet_adresser_tekst = "\n".join([a for a in rute_adresser if a])
+        er_leveret = str(row.get('Leveret', '')).strip().upper()
+        by = str(row.get('By', '')).strip()
+        
+        # Tjekker at byen matcher valget i AppSheet, OG at den ikke har X i 'Leveret'
+        # (Hvis ingen by er sendt fra AppSheet, tager den bare de første 25 uanset by)
+        if (not target_city or by == target_city) and er_leveret != 'X':
+            adresse = str(row.get('Fulde Adresse', '')).strip()
+            if adresse:
+                rute_adresser.append(adresse)
+                
+    rute_adresser = rute_adresser[:25]
+    
+    if target_city and not rute_adresser:
+        st.warning(f"Fandt ingen robotter i {target_city}, der mangler at blive leveret.")
+    elif target_city:
+        st.success(f"Fandt {len(rute_adresser)} maskiner klar til udkørsel i {target_city}.")
+        
+    sheet_adresser_tekst = "\n".join(rute_adresser)
 except Exception as e:
     st.error(f"Kunne ikke hente data fra Google Sheets: {e}")
     sheet_adresser_tekst = ""
