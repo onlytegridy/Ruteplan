@@ -4,6 +4,32 @@ import math
 from urllib.parse import quote_plus
 import requests
 import streamlit as st
+import gspread
+from google.oauth2.service_account import Credentials
+
+# 1. Opsætning af sikkerhed og forbindelse til Google Sheets
+scope = ['https://www.googleapis.com/auth/spreadsheets']
+# Her henter Streamlit hemmelighederne, som vi opsætter i Trin 3
+creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
+client = gspread.authorize(creds)
+
+# 2. Åbn arket (Husk at dele dit Google Sheet med service-kontoens mailadresse!)
+# Skift navnet ud med det præcise navn på jeres regneark
+sheet = client.open("Robotter").sheet1 
+
+# 3. Hent alle data fra arket ned i Python
+data = sheet.get_all_records()
+
+# 4. Sorter og find adresser (Finder dem der skal til Aabenraa og er klar)
+rute_adresser = []
+for row in data:
+    # Sørg for at navnet på kolonnerne matcher præcis det, de hedder i dit ark
+    if row.get('Status') == 'Klar til levering' and row.get('By') == 'Aabenraa':
+        rute_adresser.append(row['Fulde Adresse'])
+
+# 5. Vis dem i din Streamlit app for at teste
+st.write("Fandt følgende adresser i systemet:")
+st.write(rute_adresser)
 
 # ------------------ Sideopsætning + let styling ------------------
 st.set_page_config(page_title="Ruteplanlægger (flere biler)", page_icon="🚚", layout="centered")
