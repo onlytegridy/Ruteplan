@@ -255,9 +255,11 @@ def make_gmaps_links(route_addresses, max_stops=10):
 # ==========================================
 # 5. UI og Hovedlogik
 # ==========================================
-st.title("🚚 Ruteplanlægger")
+st.title("🚚 Ruteplanlægger (flere biler)")
 
+# Her griber Streamlit bynavnet fra linket, som AppSheet sendte
 target_city = st.query_params.get("by", "")
+
 if target_city:
     st.info(f"Planlægger udkørsel for: **{target_city}** (Maks 25 adresser)")
 
@@ -271,17 +273,24 @@ try:
         er_leveret = str(row.get('Leveret', '')).strip().upper()
         by = str(row.get('By', '')).strip()
         
-        # Tjekker at byen matcher valget i AppSheet, OG at den ikke har X i 'Leveret'
-        # (Hvis ingen by er sendt fra AppSheet, tager den bare de første 25 uanset by)
+        # Tjekker at byen matcher URL'en (hvis der er en), og at den IKKE har et 'X' i Leveret
         if (not target_city or by == target_city) and er_leveret != 'X':
-            adresse = str(row.get('Fulde Adresse', '')).strip()
-            if adresse:
-                rute_adresser.append(adresse)
+            
+            # Da Python kigger direkte i Google Sheets, bygger vi adressen her:
+            adresse_del = str(row.get('Adresse', '')).strip()
+            postnr_del = str(row.get('Postnr', '')).strip()
+            by_del = by # Vi har allerede hentet By længere oppe
+            
+            if adresse_del and postnr_del and by_del:
+                # Bygger strengen: "Birkevej 20, 6200 Aabenraa"
+                fuld_adresse = f"{adresse_del}, {postnr_del} {by_del}"
+                rute_adresser.append(fuld_adresse)
                 
+    # Skær ned til max 25 adresser
     rute_adresser = rute_adresser[:25]
     
     if target_city and not rute_adresser:
-        st.warning(f"Fandt ingen robotter i {target_city}, der mangler at blive leveret.")
+        st.warning(f"Fandt ingen robotter i {target_city}, der mangler at blive leveret. (Tjek at 'Leveret' kolonnen ikke har X, og at kolonnerne 'Adresse', 'Postnr' og 'By' er udfyldt).")
     elif target_city:
         st.success(f"Fandt {len(rute_adresser)} maskiner klar til udkørsel i {target_city}.")
         
