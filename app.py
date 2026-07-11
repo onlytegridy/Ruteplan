@@ -362,3 +362,6 @@ if len(addresses) >= 2:
 
         except Exception as e:
             st.error(str(e))
+
+st.link_button("🗺️ Åbn i Google Maps", google_maps_url, type="primary")
+
