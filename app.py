@@ -30,7 +30,7 @@ BALANCE_MAX_ITERS = 8      # maks. balancerings-iterationer
 HQ_ADDR = "Industrivej 6, 6200 Aabenraa"
 
 # NYT: Opdateret API URL og Headers til DanskAdresseAPI
-API_URL = "https://api.danskadresseapi.dk/dawa/autocomplete"
+API_URL = "https://api.danskadresseapi.dk/dawa/adresser"
 API_HEADERS = {
     "Authorization": f"Bearer {st.secrets['dansk_adresse_api_key']}",
     "Accept": "application/json", 
@@ -59,26 +59,22 @@ def geocode(addresses):
     for a in addresses:
         r = requests.get(
             API_URL,
-            params={"q": a, "per_side": 1},
+            # Vi bruger igen format=geojson, som gør det super nemt at trække koordinater ud
+            params={"q": a, "format": "geojson", "per_side": 1},
             headers=API_HEADERS,
             timeout=12,
         )
         if r.status_code != 200:
             raise RuntimeError(f"API-fejl {r.status_code} for '{a}': {r.text[:200]}")
         
-        forslag = r.json()
-        if not forslag:
+        data = r.json()
+        feats = data.get("features", [])
+        
+        if not feats:
             raise ValueError(f"Adresse ikke fundet: {a}")
         
-        # Hent data fra det første foreslåede resultat
-        data = forslag[0]
-        punkt = data.get("adresse") or data.get("adgangsadresse")
-        
-        if not punkt or "x" not in punkt or "y" not in punkt:
-            raise ValueError(f"Kunne ikke finde koordinater for: {a}")
-            
-        lon = punkt["x"] # x er længdegrad (longitude)
-        lat = punkt["y"] # y er breddegrad (latitude)
+        # Hent længde- og breddegrad fra GeoJSON formatet
+        lon, lat = feats[0]["geometry"]["coordinates"] 
         
         out.append((a, lat, lon))
     return out
