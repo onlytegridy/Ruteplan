@@ -28,14 +28,18 @@ BALANCE_TL = 4             # kortere tidsbudget til balancering (hurtig vurderin
 BALANCE_IMPROVE_MIN = 120  # stop balancering hvis max-min forbedres < 120 sek
 BALANCE_MAX_ITERS = 8      # maks. balancerings-iterationer
 HQ_ADDR = "Industrivej 6, 6200 Aabenraa"
-DAWA_URL = "https://api.dataforsyningen.dk/adresser"
-DAWA_HEADERS = {"Accept": "application/json", "User-Agent": "bedste-rute/1.0"}
+
+# NYT: Opdateret API URL og Headers til DanskAdresseAPI
+API_URL = "https://api.danskadresseapi.dk/dawa/autocomplete"
+API_HEADERS = {
+    "Authorization": f"Bearer {st.secrets['dansk_adresse_api_key']}",
+    "Accept": "application/json", 
+    "User-Agent": "bedste-rute/1.0"
+}
 
 # ==========================================
 # 3. Datahentning med Caching (Hastighedsoptimering)
 # ==========================================
-# @st.cache_data(ttl=600) betyder at den gemmer resultatet i 10 min. 
-# Så slipper du for at vente på Google hver gang du trækker i en slider.
 @st.cache_data(ttl=600)
 def hent_data_fra_google_sheets():
     # Tilføjet drive-scope for at undgå 'SpreadsheetNotFound' fejl
@@ -54,17 +58,28 @@ def geocode(addresses):
     out = []
     for a in addresses:
         r = requests.get(
-            DAWA_URL,
-            params={"q": a, "format": "geojson", "per_side": 1},
-            headers=DAWA_HEADERS,
+            API_URL,
+            params={"q": a, "per_side": 1},
+            headers=API_HEADERS,
             timeout=12,
         )
         if r.status_code != 200:
-            raise RuntimeError(f"DAWA-fejl {r.status_code} for '{a}': {r.text[:200]}")
-        feats = r.json().get("features", [])
-        if not feats:
+            raise RuntimeError(f"API-fejl {r.status_code} for '{a}': {r.text[:200]}")
+        
+        forslag = r.json()
+        if not forslag:
             raise ValueError(f"Adresse ikke fundet: {a}")
-        lon, lat = feats[0]["geometry"]["coordinates"]  # GeoJSON: [lon, lat]
+        
+        # Hent data fra det første foreslåede resultat
+        data = forslag[0]
+        punkt = data.get("adresse") or data.get("adgangsadresse")
+        
+        if not punkt or "x" not in punkt or "y" not in punkt:
+            raise ValueError(f"Kunne ikke finde koordinater for: {a}")
+            
+        lon = punkt["x"] # x er længdegrad (longitude)
+        lat = punkt["y"] # y er breddegrad (latitude)
+        
         out.append((a, lat, lon))
     return out
 
@@ -257,13 +272,11 @@ def make_gmaps_links(route_addresses, max_stops=10):
 # ==========================================
 st.title("🚚 Ruteplanlægger (flere biler)")
 
-# Her griber Streamlit bynavnet fra linket, som AppSheet sendte
 target_city = st.query_params.get("by", "")
 
 if target_city:
     st.info(f"Planlægger udkørsel for: **{target_city}** (Maks 25 adresser)")
 
-# Prøv at hente adresser fra Google Sheets
 try:
     with st.spinner("Henter adresser fra Google Sheets..."):
         data = hent_data_fra_google_sheets()
@@ -273,20 +286,16 @@ try:
         er_leveret = str(row.get('Leveret', '')).strip().upper()
         by = str(row.get('By', '')).strip()
         
-        # Tjekker at byen matcher URL'en (hvis der er en), og at den IKKE har et 'X' i Leveret
         if (not target_city or by == target_city) and er_leveret != 'X':
             
-            # Da Python kigger direkte i Google Sheets, bygger vi adressen her:
             adresse_del = str(row.get('Adresse', '')).strip()
             postnr_del = str(row.get('Postnr', '')).strip()
-            by_del = by # Vi har allerede hentet By længere oppe
+            by_del = by
             
             if adresse_del and postnr_del and by_del:
-                # Bygger strengen: "Birkevej 20, 6200 Aabenraa"
                 fuld_adresse = f"{adresse_del}, {postnr_del} {by_del}"
                 rute_adresser.append(fuld_adresse)
                 
-    # Skær ned til max 25 adresser
     rute_adresser = rute_adresser[:25]
     
     if target_city and not rute_adresser:
@@ -343,7 +352,7 @@ if len(addresses) >= 2:
         try:
             ordered = [start_choice] + [a for a in addresses if a != start_choice]
 
-            with st.spinner("Geokoder adresser via DAWA…"):
+            with st.spinner("Geokoder adresser via DanskAdresseAPI…"):
                 geocoded = geocode(ordered)
             coords = [(lat, lon) for _, lat, lon in geocoded]
 
